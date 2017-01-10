@@ -1,0 +1,135 @@
+#!/bin/bash
+HOSTIP=$(hostname -I | awk '{print $1}')
+##################
+# ELASTIQ CONFIG #
+##################
+EC2_ACCESS_KEY=xxx
+EC2_SECRET_KEY=xxx
+EC2_URL=https://cloud-areapd.pd.infn.it:8788/services/Cloud
+KEY_NAME=xxx
+MAX_VMS=10
+MIN_VMS=2
+FLAVOR=cldareapd.large
+IMAGE_ID=ami-be72cea8
+ROOTPW=xxx
+CUID=$(id condor | awk '{print $1}'| cut -d'=' -f2|cut -d'(' -f1)
+CGID=$(id condor | awk '{print $2}'| cut -d'=' -f2|cut -d'(' -f1)
+#
+echo "Check Lustre: df"
+#
+df
+#
+echo "Check /lustre/cmswork directory"
+df | grep /lustre/cmswork
+CKCMSWORK=$?
+#
+echo "Check /homeui directory"
+df | grep /homeui
+CKHOMEUI=$?
+#
+echo "ckcmswork" $CKCMSWORK
+echo "ckhomeui" $CKHOMEUI
+#
+if [ $CKCMSWORK -ne 0 ] || [ $CKHOMEUI -ne 0 ]
+then
+    echo "problema lustre"
+    if [ $CKCMSWORK -ne 0 ]
+    then
+	echo "Problem with mount of lustre, no /lustre/cmswork"|logger -s -t "LUSTRE cmswork"
+    fi
+    if [ $CKHOMEUI -ne 0 ]
+    then
+	echo "Problem with mount of lustre, no /homeui"|logger -s -t "LUSTRE homeui"
+    fi
+    /sbin/poweroff
+else
+    cat << EOF >/etc/condor/condor_config.local
+
+DAEMON_LIST = COLLECTOR, MASTER, NEGOTIATOR, SCHEDD
+CONDOR_HOST = $HOSTIP
+CONDOR_ADMIN = root@$HOSTIP
+
+# Preserve UID of submitting user
+UID_DOMAIN = *
+TRUST_UID_DOMAIN = True
+SOFT_UID_DOMAIN = True
+
+CONDOR_IDS = $CUID.$CGID
+QUEUE_SUPER_USERS = root, condor
+HIGHPORT = 45000
+LOWPORT = 41000
+EOF
+
+    cat << EOF >/etc/condor/config.d/SL6 
+##############
+# SL Cluster #
+##############
+SEC_DAEMON_AUTHENTICATION = required
+SEC_DAEMON_INTEGRITY = required
+SEC_DAEMON_AUTHENTICATION_METHODS = password
+SEC_CLIENT_AUTHENTICATION_METHODS = password,fs,gsi,kerberos
+SEC_PASSWORD_FILE = /etc/condor/condor_credential
+SEC_ENABLE_MATCH_PASSWORD_AUTHENTICATION = True
+
+ALLOW_DAEMON = condor_pool@*, submit-side@matchsession
+## Short description: Change this to an appropriate name (30 chr. limit)
+COLLECTOR_NAME = CernVM cluster at \$(CONDOR_HOST)
+##  Sets how often the condor_negotiator starts a negotiation cycle.
+##  It is defined in seconds and defaults to 60 (1 minute).
+NEGOTIATOR_INTERVAL = 20
+##  When is this machine willing to start a job?
+START = TRUE
+##  When to suspend a job?
+SUSPEND = FALSE
+##  When to nicely stop a job?
+##  (as opposed to killing it instantaneously)
+PREEMPT = FALSE
+##  When to instantaneously kill a preempting job
+##  (e.g. if a job is in the pre-empting stage for too long)
+KILL = FALSE
+##  Disable UID_DOMAIN check when submit a job
+TRUST_UID_DOMAIN = TRUE
+
+##  Use TCP instead of UDP, and cache TCP sockets
+##  (more reliable on some cloud networks)
+UPDATE_COLLECTOR_WITH_TCP = True
+COLLECTOR_SOCKET_CACHE_SIZE = 1000
+
+## Avoid crashes of the collector
+CONDOR_DEVELOPERS_COLLECTOR = NONE
+EOF
+
+    /usr/sbin/condor_store_cred -p 12345 add -f /etc/condor/condor_credential
+
+    service condor start
+
+    cat<< EOF >/etc/elastiq.conf 
+[elastiq]
+check_queue_every_s = 600
+idle_for_time_s = 600
+waiting_jobs_time_s = 600 
+n_jobs_per_vm = 4 
+batch_plugin = htcondor
+estimated_vm_deploy_time_s = 420
+check_vms_every_s = 300
+log_level = 20
+
+[ec2]
+flavour = $FLAVOR
+api_url = $EC2_URL
+user_data_b64 = IyEvYmluL2Jhc2gNCkhPU1RJUD0kKGhvc3RuYW1lIC1JIHwgYXdrICd7cHJpbnQgJDF9JykNClJPT1RQVz1IVENAZWxxMTMNCiMNCkNVSUQ9JChpZCBjb25kb3IgfCBhd2sgJ3twcmludCAkMX0nfCBjdXQgLWQnPScgLWYyfGN1dCAtZCcoJyAtZjEpDQpDR0lEPSQoaWQgY29uZG9yIHwgYXdrICd7cHJpbnQgJDJ9J3wgY3V0IC1kJz0nIC1mMnxjdXQgLWQnKCcgLWYxKQ0KIw0KDQplY2hvICJzb25vIHF1aSBpbiBjaGVjayBsdXN0cmU6IGRmIg0KDQpkZg0KDQpkZiB8IGdyZXAgL2x1c3RyZS9jbXN3b3JrDQpja2Ntc3dvcms9JD8NCg0KZGYgfCBncmVwIC9ob21ldWkNCmNraG9tZXVpPSQ/DQoNCmVjaG8gImNrY21zd29yayIgJGNrY21zd29yaw0KZWNobyAiY2tob21ldWkiICRja2hvbWV1aQ0KDQppZiBbICRja2Ntc3dvcmsgLW5lIDAgXSB8fCBbICRja2hvbWV1aSAtbmUgMCBdDQp0aGVuDQogICBlY2hvICJwcm9ibGVtYSBsdXN0cmUiDQogICBpZiBbICRja2Ntc3dvcmsgLW5lIDAgXQ0KICAgdGhlbg0KICAgICAgIGVjaG8gIlByb2JsZW0gd2l0aCBtb3VudCBvZiBsdXN0cmUsIG5vIC9sdXN0cmUvY21zd29yayJ8bG9nZ2VyIC1zIC10ICJMVVNUUkUgY21zd29yayINCiAgIGZpDQogICBpZiBbICRja2hvbWV1aSAtbmUgMCBdDQogICB0aGVuDQogICAgICAgZWNobyAiUHJvYmxlbSB3aXRoIG1vdW50IG9mIGx1c3RyZSwgbm8gL2hvbWV1aSJ8bG9nZ2VyIC1zIC10ICJMVVNUUkUgaG9tZXVpIg0KICAgZmkNCg0KICAgL3NiaW4vcG93ZXJvZmYNCg0KZWxzZQ0KDQpjYXQgPDwgRU9GID4vZXRjL2NvbmRvci9jb25kb3JfY29uZmlnLmxvY2FsDQpEQUVNT05fTElTVCA9IE1BU1RFUiwgU1RBUlREDQpDT05ET1JfSE9TVCA9ICVpcHY0JQ0KQ09ORE9SX0FETUlOID0gcm9vdEAlaXB2NCUNCg0KIyBQcmVzZXJ2ZSBVSUQgb2Ygc3VibWl0dGluZyB1c2VyDQpVSURfRE9NQUlOID0gKg0KVFJVU1RfVUlEX0RPTUFJTiA9IFRydWUNClNPRlRfVUlEX0RPTUFJTiA9IFRydWUNCg0KQ09ORE9SX0lEUyA9ICRDVUlELiRDR0lEDQpRVUVVRV9TVVBFUl9VU0VSUyA9IHJvb3QsIGNvbmRvcg0KSElHSFBPUlQgPSA0NTAwMA0KTE9XUE9SVCA9IDQxMDAwDQpORVRXT1JLX0lOVEVSRkFDRSA9ICRIT1NUSVANCk5PX0ROUyA9IFRydWUNCkRFRkFVTFRfRE9NQUlOX05BTUUgPSBJTkZOLVBEDQpFT0YNCiMNCmNhdCA8PEVPRj4gL2V0Yy9jb25kb3IvY29uZmlnLmQvU0w2DQojIyMjIyMjIyMjIyMjIw0KIyBTTCBDbHVzdGVyICMNCiMjIyMjIyMjIyMjIyMjDQpTRUNfREFFTU9OX0FVVEhFTlRJQ0FUSU9OID0gcmVxdWlyZWQNClNFQ19EQUVNT05fSU5URUdSSVRZID0gcmVxdWlyZWQNClNFQ19EQUVNT05fQVVUSEVOVElDQVRJT05fTUVUSE9EUyA9IHBhc3N3b3JkDQpTRUNfQ0xJRU5UX0FVVEhFTlRJQ0FUSU9OX01FVEhPRFMgPSBwYXNzd29yZCxmcyxnc2ksa2VyYmVyb3MNClNFQ19QQVNTV09SRF9GSUxFID0gL2V0Yy9jb25kb3IvY29uZG9yX2NyZWRlbnRpYWwNClNFQ19FTkFCTEVfTUFUQ0hfUEFTU1dPUkRfQVVUSEVOVElDQVRJT04gPSBUcnVlDQoNCkFMTE9XX0RBRU1PTiA9IGNvbmRvcl9wb29sQCosIHN1Ym1pdC1zaWRlQG1hdGNoc2Vzc2lvbg0KIyMgU2hvcnQgZGVzY3JpcHRpb246IENoYW5nZSB0aGlzIHRvIGFuIGFwcHJvcHJpYXRlIG5hbWUgKDMwIGNoci4gbGltaXQpDQpDT0xMRUNUT1JfTkFNRSA9IENlcm5WTSBjbHVzdGVyIGF0IFwkKENPTkRPUl9IT1NUKQ0KIyMgIFNldHMgaG93IG9mdGVuIHRoZSBjb25kb3JfbmVnb3RpYXRvciBzdGFydHMgYSBuZWdvdGlhdGlvbiBjeWNsZS4NCiMjICBJdCBpcyBkZWZpbmVkIGluIHNlY29uZHMgYW5kIGRlZmF1bHRzIHRvIDYwICgxIG1pbnV0ZSkuDQpORUdPVElBVE9SX0lOVEVSVkFMID0gMjANCiMjICBXaGVuIGlzIHRoaXMgbWFjaGluZSB3aWxsaW5nIHRvIHN0YXJ0IGEgam9iPw0KU1RBUlQgPSBUUlVFDQojIyAgV2hlbiB0byBzdXNwZW5kIGEgam9iPw0KU1VTUEVORCA9IEZBTFNFDQojIyAgV2hlbiB0byBuaWNlbHkgc3RvcCBhIGpvYj8NCiMjICAoYXMgb3Bwb3NlZCB0byBraWxsaW5nIGl0IGluc3RhbnRhbmVvdXNseSkNClBSRUVNUFQgPSBGQUxTRQ0KIyMgIFdoZW4gdG8gaW5zdGFudGFuZW91c2x5IGtpbGwgYSBwcmVlbXB0aW5nIGpvYg0KIyMgIChlLmcuIGlmIGEgam9iIGlzIGluIHRoZSBwcmUtZW1wdGluZyBzdGFnZSBmb3IgdG9vIGxvbmcpDQpLSUxMID0gRkFMU0UNCiMjICBEaXNhYmxlIFVJRF9ET01BSU4gY2hlY2sgd2hlbiBzdWJtaXQgYSBqb2INClRSVVNUX1VJRF9ET01BSU4gPSBUUlVFDQoNCiMjICBVc2UgVENQIGluc3RlYWQgb2YgVURQLCBhbmQgY2FjaGUgVENQIHNvY2tldHMNCiMjICAobW9yZSByZWxpYWJsZSBvbiBzb21lIGNsb3VkIG5ldHdvcmtzKQ0KVVBEQVRFX0NPTExFQ1RPUl9XSVRIX1RDUCA9IFRydWUNCkNPTExFQ1RPUl9TT0NLRVRfQ0FDSEVfU0laRSA9IDEwMDANCg0KIyMgQXZvaWQgY3Jhc2hlcyBvZiB0aGUgY29sbGVjdG9yDQpDT05ET1JfREVWRUxPUEVSU19DT0xMRUNUT1IgPSBOT05FDQpFT0YNCiMNCi91c3Ivc2Jpbi9jb25kb3Jfc3RvcmVfY3JlZCAtcCAxMjM0NSBhZGQgLWYgL2V0Yy9jb25kb3IvY29uZG9yX2NyZWRlbnRpYWwNCiMNCnNlcnZpY2UgY29uZG9yIHN0YXJ0DQojDQp5dW0gaW5zdGFsbCAteSB4cm9vdGQtY2xpZW50DQojDQplY2hvICRST09UUFcgfCBwYXNzd2QgLS1zdGRpbiByb290DQoNCmZp=
+image_id = $IMAGE_ID
+aws_secret_access_key = $EC2_SECRET_KEY
+aws_access_key_id = $EC2_ACCESS_KEY
+key_name= $KEY_NAME
+
+[quota]
+max_vms = $MAX_VMS
+min_vms = $MIN_VMS
+EOF
+    service elastiq restart
+
+    yum install -y xrootd-client
+
+    echo $ROOTPW | passwd --stdin root 
+fi
